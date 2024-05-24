@@ -22,5 +22,8 @@ COPY --from=build /app .
 RUN git config --global user.email "pavan.nayakanti@irissoftware.com"
 RUN git config --global user.name "Pavan Nayakanti"
 
+# Expose port 5000
+EXPOSE 5000
+
 # Start the application
 CMD ["python", "app.py"]
