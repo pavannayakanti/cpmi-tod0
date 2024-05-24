@@ -1,14 +1,57 @@
 import threading
-import streamlit as st
 from flask import Flask, jsonify, request
 from flask_sqlalchemy import SQLAlchemy
 import signal
+import boto3
+from botocore.exceptions import ClientError, NoCredentialsError
+import json
 
 # Create a Flask app
 app = Flask(__name__)
 
+def handle_signal(sig, frame):
+    print(f"Signal received: {sig}")
+    app.logger.info(f"Signal received: {sig}")
+
+def get_secret(secret_name, region_name="us-east-1"):
+    # Create a Secrets Manager client
+    session = boto3.session.Session()
+    client = session.client(
+        service_name='secretsmanager',
+        region_name=region_name
+    )
+
+    try:
+        get_secret_value_response = client.get_secret_value(
+            SecretId=secret_name
+        )
+    except ClientError as e:
+        raise e
+    except NoCredentialsError as e:
+        raise e
+
+    # Parse the secret value as JSON
+    secret_dict = json.loads(get_secret_value_response['SecretString'])
+
+    return secret_dict
+
+try:
+    # Retrieve the secret value
+    # secret = get_secret(secret_name="rds!db-eba76f1a-75ee-4617-bc0e-3fac8bcf8e53")
+    # app.config['SQLALCHEMY_DATABASE_URI'] = f"mysql://{secret['username']}:{secret['password']}"
+    secret = get_secret(secret_name="dev/cpmi/MySql")
+    app.config['SQLALCHEMY_DATABASE_URI'] = f"mysql://{secret['username']}:{secret['password']}@{secret['host']}:{secret['port']}/{secret['dbInstanceIdentifier']}"
+
+    # Start a new thread to handle signals
+    signal_thread = threading.Thread(target=handle_signal, args=(signal.SIGINT, None))
+    signal_thread.start()
+
+    # Run the Flask app
+    app.run(debug=True)
+except NoCredentialsError as e:
+    print("No AWS credentials found. Please set your credentials using environment variables or a credentials file.")
+
 # Configure the database connection
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///applications.db'
 db = SQLAlchemy(app)
 
 # Define the Application class
@@ -25,101 +68,71 @@ class Application(db.Model):
 with app.app_context():
     db.create_all()
 
-# Streamlit interface
-@app.route("/")
-def index():
-    st.title("CPMI Application Management")
+# Add a new application
+@app.route("/applications", methods=["POST"])
+def add_application():
+    try:
+        data = request.get_json()
+        new_application = Application(
+            name=data["name"],
+            scoped_year=data["scoped_year"],
+            product_owner=data["product_owner"]
+        )
+        db.session.add(new_application)
+        db.session.commit()
+        return jsonify({"message": "Application added successfully!"}), 201
+    except Exception as e:
+        return jsonify({"error": f"Error retrieving applications: {e}"}), 500
 
-    # Add a new application
-    with st.form("add_application"):
-        name = st.text_input("Application Name")
-        scoped_year = st.number_input("Scoped Year")
-        product_owner = st.text_input("Product Owner")
 
-        submitted = st.form_submit_button("Add Application")
-
-        if submitted:
-            try:
-                new_application = Application(
-                    name=name,
-                    scoped_year=scoped_year,
-                    product_owner=product_owner
-                )
-                db.session.add(new_application)
-                db.session.commit()
-                st.success("Application added successfully!")
-            except Exception as e:
-                st.error(f"Error adding application: {e}")
-
-    # Display existing applications
-    st.header("Existing Applications")
+# Get all applications
+@app.route("/applications", methods=["GET"])
+def get_applications():
     try:
         applications = Application.query.all()
-        st.table(
-            [
-                [app.id, app.name, app.scoped_year, app.product_owner]
-                for app in applications
-            ]
-        )
+        return jsonify([
+            {
+                "id": app.id,
+                "name": app.name,
+                "scoped_year": app.scoped_year,
+                "product_owner": app.product_owner
+            }
+            for app in applications
+        ]), 200
     except Exception as e:
-        st.error(f"Error retrieving applications: {e}")
+        return jsonify({"error": f"Error retrieving applications: {e}"}), 500
 
-    # Update an application
-    application_id = st.number_input("Application ID to Update")
-    if application_id:
-        try:
-            application_to_update = Application.query.get(application_id)
-            if application_to_update:
-                with st.form("update_application"):
-                    name = st.text_input("Application Name", application_to_update.name)
-                    scoped_year = st.number_input(
-                        "Scoped Year", application_to_update.scoped_year
-                    )
-                    product_owner = st.text_input(
-                        "Product Owner", application_to_update.product_owner
-                    )
-                    # ... (add input fields for other properties)
-                    submitted = st.form_submit_button("Update Application")
+# Update an application
+@app.route("/applications/<int:application_id>", methods=["PUT"])
+def update_application(application_id):
+    try:
+        application_to_update = Application.query.get(application_id)
+        if application_to_update:
+            data = request.get_json()
+            application_to_update.name = data["name"]
+            application_to_update.scoped_year = data["scoped_year"]
+            application_to_update.product_owner = data["product_owner"]
+            db.session.commit()
+            return jsonify({"message": "Application updated successfully!"}), 200
+        else:
+            return jsonify({"error": "Application not found."}), 404
+    except Exception as e:
+        return jsonify({"error": f"Error updating application: {e}"}), 500
 
-                    if submitted:
-                        application_to_update.name = name
-                        application_to_update.scoped_year = scoped_year
-                        application_to_update.product_owner = product_owner
-                        # ... (update other properties)
-                        db.session.commit()
-                        st.success("Application updated successfully!")
-            else:
-                st.error("Application not found.")
-        except Exception as e:
-            st.error(f"Error updating application: {e}")
-
-    # Delete an application
-    application_id_to_delete = st.number_input("Application ID to Delete")
-    if application_id_to_delete:
-        try:
-            application_to_delete = Application.query.get(application_id_to_delete)
-            if application_to_delete:
-                if st.button(f"Delete Application {application_id_to_delete}"):
-                    db.session.delete(application_to_delete)
-                    db.session.commit()
-                    st.success("Application deleted successfully!")
-            else:
-                st.error("Application not found.")
-        except Exception as e:
-            st.error(f"Error deleting application: {e}")
-
-    return st.__dict__
+# Delete an application
+@app.route("/applications/<int:application_id>", methods=["DELETE"])
+def delete_application(application_id):
+    try:
+        application_to_delete = Application.query.get(application_id)
+        if application_to_delete:
+            db.session.delete(application_to_delete)
+            db.session.commit()
+            return jsonify({"message": "Application deleted successfully!"}), 200
+        else:
+            return jsonify({"error": "Application not found."}), 404
+    except Exception as e:
+        return jsonify({"error": f"Error deleting application: {e}"}), 500
 
 # Run the Flask app
 if __name__ == "__main__":
-    def handle_signal(sig, frame):
-        print(f"Signal received: {sig}")
-        app.logger.info(f"Signal received: {sig}")
-        app.exit()
-
-        with app.app_context():
-            # Start a new thread to handle signals
-            signal_thread = threading.Thread(target=handle_signal, args=(signal.SIGINT,))
-            signal_thread.start()
-
-            app.run(debug=True)
+    app.run()
